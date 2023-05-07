@@ -4,7 +4,7 @@
 - Casadi is Used for nonlinear optimization for MPC. 
 - A kinematic vehicle model is used for state prediction.
 
-
+TODO: Add more details
 
 
 
