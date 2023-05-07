@@ -1,3 +1,8 @@
+""" Carsim Run class
+This can be used to run Carsim Simulation step given a defined import and export array
+
+"""
+
 import argparse
 import ctypes
 from time import sleep
@@ -39,6 +44,7 @@ class CarsimRUn:
         self.t_current = self.t_current + self.configuration.get("t_step")
         t_step_size = self.configuration.get("t_step")
 
+        # Converted to degerees and Multiplied for steering ratio (steering wheel to vehicle wheel??)
         self.import_array[0] = math.degrees(delta_in_rad) * 20
         status, self.export_array = self.vs.integrate_io(
             self.t_current, self.import_array, self.export_array
@@ -51,8 +57,8 @@ class CarsimRUn:
 
 
 if __name__ == "__main__":
-    sim_file_filename = "C:\\Users\\Rokon\\Desktop\\Carsim_work\\python\\gps_path.sim"
-    path_to_vs_dll = "C:\\Users\\Rokon\\Desktop\\Carsim_work\\python\\carsim_64.dll"
+    sim_file_filename = "gps_path.sim"
+    path_to_vs_dll = "carsim_64.dll"
 
     sim_time = 0
     try:

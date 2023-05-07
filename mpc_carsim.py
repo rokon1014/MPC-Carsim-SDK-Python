@@ -1,24 +1,20 @@
-from CarsimRunClass import CarsimRUn
-import argparse
-import ctypes
-from time import sleep
-import vs_solver
+import time
 import math
-from vehicle_models import (
-    kinematic_model,
-    kinematic_model_casadi,
-    kinematic_model_casadi_local,
-)
-from dataclasses import dataclass
-from matplotlib import pyplot as plt
-from utils import Vehicle, States, get_path_and_lanes
 import casadi
+import ctypes
+import argparse
+import vs_solver
+import pickle
 import numpy as np
 import pandas as pd
+from time import sleep
+from dataclasses import dataclass
 from scipy.spatial import distance
+from CarsimRunClass import CarsimRUn
+from matplotlib import pyplot as plt
 from scipy.signal import savgol_filter
-import pickle
-import time
+from vehicle_models import kinematic_model_casadi
+from utils import Vehicle, States, get_path_and_lanes
 
 SIMTIME = 50
 
@@ -33,10 +29,9 @@ WEIGHT_X = 2
 WEIGHT_Y = 2
 WEIGHT_YAW = 5000
 WEIGHT_V = 1
-WEIGHT_DELTA =100
+WEIGHT_DELTA = 100
 WEIGHT_DIST = 0.445
 
-    
 
 def get_path_and_lanes():
     """Read excel files and extract path
@@ -61,10 +56,7 @@ def get_path_and_lanes():
     py_right = df_right[df_right.columns[1]]
     px_right_smoothed = savgol_filter(px_right, 51, 3)
 
-    # plt.plot(py_left, px_left_smoothed, "b")
-    # plt.plot(py_left, px_left, "r")
-
-    return px, py, px_left_smoothed, py_left, px_right_smoothed, py_right
+    return px, py, pth
 
 
 def find_closest_point_index(px, py, curx, cury):
@@ -74,7 +66,7 @@ def find_closest_point_index(px, py, curx, cury):
     ddd = distance.cdist(curxy, pxy, "sqeuclidean")
     min_dist = np.min(ddd)
     min_index = np.argmin(ddd)
-    return min_index + 8 , min_dist
+    return min_index + 8, min_dist
 
 
 class MPCTracking:
@@ -85,7 +77,7 @@ class MPCTracking:
         self.goal_pose = [0, 0, 0]
         self.mpc_i = 0
         self.cnt = 0  # delta
-        self.cnt_history= []
+        self.cnt_history = []
 
     def mpc_operation(self):
         tc = 0
@@ -98,30 +90,40 @@ class MPCTracking:
         sdist = []
 
         # get path
-        _, _, px_left, py_left, px_right, py_right = get_path_and_lanes()
+        px, py, pth, _ = get_path_and_lanes()
 
         try:
             # start state
             t, t_step, self.states = csr.check_configuration()
             print(self.states)
 
+            # Run Carsim Simulation for the specified time.
             while sim_time < SIMTIME:
                 tc = tc + t_step
 
+                # MPC timer
+                # run MPC after each 0.03s. Carsim is running at much higher frequency
                 if tc > 0.03:
                     x = self.states[0]
                     y = self.states[1]
                     yaw = math.radians(self.states[2])
                     mpc_current_state = [x, y, yaw]
 
-                    closest_index, dist = find_closest_point_index(px_right, py_right, x, y)
+                    # find the closest reference point from the vehicle
+                    closest_index, dist = find_closest_point_index(px, py, x, y)
 
-                    goal_left = [px_left[closest_index], py_left[closest_index]]
+                    goal = [
+                        px[closest_index],
+                        py[closest_index],
+                        pth[closest_index],
+                    ]
 
-                    local_x = (goal_left[0] - x) * math.cos(yaw) + (goal_left[1] - y) * math.sin(
+                    # Converting goal position to local(vehicle) coordinate
+                    # Not used
+                    local_x = (goal[0] - x) * math.cos(yaw) + (goal[1] - y) * math.sin(
                         yaw
                     )
-                    local_y = -(goal_left[0] - x) * math.sin(yaw) + (goal_left[1] - y) * math.cos(
+                    local_y = -(goal[0] - x) * math.sin(yaw) + (goal[1] - y) * math.cos(
                         yaw
                     )
 
@@ -137,15 +139,17 @@ class MPCTracking:
 
                     # filling parameter values
                     opti.set_value(states_current, mpc_current_state)
-                    opti.set_value(x_ref, goal_left[0])
-                    opti.set_value(y_ref, goal_left[1])
+                    opti.set_value(x_ref, goal[0])
+                    opti.set_value(y_ref, goal[1])
+                    opti.set_value(yaw_ref, goal[2])
 
-                    opti.set_value(local_ref_x, goal_left[0])
-                    opti.set_value(local_ref_y, goal_left[1])
+                    # Not used
+                    opti.set_value(local_ref_x, goal[0])
+                    opti.set_value(local_ref_y, goal[1])
 
                     try:
                         solution = opti.solve()
-                        # print("FOUND SOLUTION")
+                        print("FOUND SOLUTION")
                         c1 = solution.value(u_dv)
                         delta = c1[0]
 
@@ -156,38 +160,33 @@ class MPCTracking:
                         sol_y = opti.debug.value(y_dv)
 
                         c1 = opti.debug.value(u_dv)
+
+                        # Using sub-optimal result
                         delta = c1[0]
 
-                    # plt.plot(y, x, "*")
-                    # plt.plot(goal_left[1], goal_left[0], "o")
-                    # plt.draw()
-                    # plt.pause(0.001)
-
-                    # resetting tc
+                    # resetting MPC timer
                     tc = 0
 
-                    print("elapsed", time.time()-start)
-                   
-                    self.cnt_history.append(delta)
-                    # print("HIST", self.cnt_history)
+                    # Checking optimization time
+                    print("elapsed", time.time() - start)
 
+                    # Saving in history for filtering (smoothing)
+                    self.cnt_history.append(delta)
 
                     # smoothing the steering angle
-                    if len(self.cnt_history)>100:
+                    if len(self.cnt_history) > 100:
                         self.cnt_history.pop(0)
                         smoothed = savgol_filter(self.cnt_history, 40, 3)
                         delta = smoothed[-1]
 
                         print(sim_time, time_step, self.states)
                         sdelta.append(delta)
-                        
+
+                        # Keeping in list for saving in CSV
                         sx.append(x)
                         sy.append(y)
                         syaw.append(yaw)
                         sdist.append(local_y)
-
-
-
 
                 # run with a given steering angle at each step
                 sim_time, time_step, self.states = csr.run(delta)
@@ -199,16 +198,13 @@ class MPCTracking:
             result_df = pd.DataFrame({"x": sx, "y": sy, "delta": sdelta, "yaw": syaw})
             date_time = time.strftime("%Y-%m-%d-%H%M%S")
             result_df.to_csv(
-                "run_results\\result-right-lane" + ".csv",
+                "run_results" + date_time + ".csv",
                 index=False,
             )
 
-
             # Visualization
-            f1= plt.figure(1)
+            f1 = plt.figure(1)
             plt.plot(sy, sx)
-            plt.plot(py_left,px_left)
-            plt.plot(py_right, px_right)
 
             f2 = plt.figure(2)
             plt.plot(sdelta)
@@ -247,6 +243,7 @@ if __name__ == "__main__":
     # references (GOAL!!)
     x_ref = opti.parameter(1)
     y_ref = opti.parameter(1)
+    yaw_ref = opti.parameter(1)
 
     local_ref_x = opti.parameter(1)
     local_ref_y = opti.parameter(1)
@@ -262,8 +259,8 @@ if __name__ == "__main__":
 
     cost = 0
     for i in range(PREDICTION_HORIZON):
-        st, x_dist, y_dist = kinematic_model_casadi_local(
-            ca_states[i, :], u_dv[i, :], TIME_STEP, vehicle, local_ref_x, local_ref_y
+        st, x_dist, y_dist = kinematic_model_casadi(
+            ca_states[i, :], u_dv[i, :], TIME_STEP, vehicle
         )
 
         opti.subject_to(x_dv[i + 1] == st[0])
@@ -271,25 +268,20 @@ if __name__ == "__main__":
         opti.subject_to(yaw_dv[i + 1] == st[2])
 
         # cost
-        # cost_states = (
-        #     WEIGHT_X * ((x_dv[i + 1] - x_ref) - 0.5) ** 2
-        #     + WEIGHT_Y * (y_dv[i + 1] - y_ref) ** 2
-        #     + WEIGHT_YAW * (yaw_dv[i + 1] - yaw_ref) ** 2
-        # )
+        cost_states = (
+            WEIGHT_X * ((x_dv[i + 1] - x_ref) - 0.5) ** 2
+            + WEIGHT_Y * (y_dv[i + 1] - y_ref) ** 2
+            + WEIGHT_YAW * (yaw_dv[i + 1] - yaw_ref) ** 2
+        )
 
-        # cost = cost + cost_states
-
-        cost_states = WEIGHT_X * (x_dist) ** 2 + WEIGHT_Y * (y_dist - WEIGHT_DIST) ** 2 +  WEIGHT_YAW * (yaw_dv[i + 1] - yaw_dv[i ]) ** 2
         cost = cost + cost_states
 
-        if i < PREDICTION_HORIZON - 1:
-            cost_u = WEIGHT_DELTA * (u_dv[i + 1] - u_dv[i]) ** 2
-            cost = cost + cost_u
-
+    # Constraints on control
     opti.subject_to(u_dv < 0.9)
     opti.subject_to(u_dv > -0.9)
 
     ## NLP stuff
+    ## Using Ipopt for NLP
     opti.minimize(cost)
     s_opts = {
         # "ipopt.max_iter": 10000,
